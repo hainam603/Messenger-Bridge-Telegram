@@ -69,12 +69,25 @@ def _default_e2ee_binary() -> Optional[str]:
     candidates = [
         PROJECT_ROOT.parent / "fbchat-v2" / "build" / binary_name,
         PROJECT_ROOT.parent / "fbchat-v2-pypi" / "build" / binary_name,
+        PROJECT_ROOT / "build" / binary_name,
     ]
     for candidate in candidates:
         resolved = candidate.resolve()
         if resolved.exists():
             return str(resolved)
     return None
+
+
+def _resolve_e2ee_binary() -> Optional[str]:
+    raw = os.environ.get("FBCHAT_E2EE_BIN", "").strip()
+    if raw:
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            path = (PROJECT_ROOT / path).resolve()
+        else:
+            path = path.resolve()
+        return str(path)
+    return _default_e2ee_binary()
 
 
 def _read_cookie() -> str:
@@ -128,7 +141,7 @@ def load_config() -> AppConfig:
         fbchat_src = None
     else:
         fbchat_src = _resolve_path(fbchat_src_raw, fbchat_src_raw) if fbchat_src_raw else _default_fbchat_src_path()
-    e2ee_bin = os.environ.get("FBCHAT_E2EE_BIN") or _default_e2ee_binary()
+    e2ee_bin = _resolve_e2ee_binary()
 
     return AppConfig(
         log_level=os.environ.get("LOG_LEVEL", "DEBUG").strip().upper() or "DEBUG",
@@ -144,7 +157,7 @@ def load_config() -> AppConfig:
         fbchat_e2ee_memory_only=_env_bool("FBCHAT_E2EE_MEMORY_ONLY", True),
         fbchat_enable_e2ee=_env_bool("FBCHAT_ENABLE_E2EE", True),
         fbchat_e2ee_send_timeout=float(os.environ.get("FBCHAT_E2EE_SEND_TIMEOUT", "180")),
-        ignore_self_messages=_env_bool("IGNORE_SELF_MESSAGES", True),
+        ignore_self_messages=_env_bool("IGNORE_SELF_MESSAGES", False),
         message_cache_limit=_env_int("MESSAGE_CACHE_LIMIT", 3000),
         telegram_connect_timeout=float(os.environ.get("TG_CONNECT_TIMEOUT", "15")),
         telegram_read_timeout=float(os.environ.get("TG_READ_TIMEOUT", "45")),

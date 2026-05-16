@@ -36,6 +36,9 @@ READ_RECEIPT_TTL_SECONDS = 5.0
 TYPING_TTL_SECONDS = 20.0
 ACTIVITY_DEDUPE_RETENTION_MS = 10 * 60 * 1000
 REACTION_STATE_RETENTION_MS = 6 * 60 * 60 * 1000
+GENERAL_NOTIFY_DEDUPE_MS = 2 * 60 * 1000
+# Telegram General topic id is 1, but posting with message_thread_id=1 often fails.
+MIN_USABLE_FORUM_TOPIC_ID = 2
 PHOTO_CAPTION_LIMIT = 1024
 MEDIA_DOWNLOAD_TIMEOUT = (10, 45)
 MEDIA_DOWNLOAD_MAX_BYTES = 50 * 1024 * 1024
@@ -73,6 +76,7 @@ class MessengerTelegramBridge:
         self._reaction_activity_state: dict[str, tuple[str, int]] = {}
         self._typing_messages: dict[str, tuple[int, int]] = {}
         self._ephemeral_delete_tasks: dict[str, asyncio.Task] = {}
+        self._general_notify_dedupe: dict[str, int] = {}
 
     async def start(self, application: Application) -> None:
         self.bot = application.bot
@@ -356,8 +360,28 @@ class MessengerTelegramBridge:
             return text
         return text.split("@", 1)[0]
 
+    @staticmethod
+    def _is_usable_telegram_topic_id(topic_id: int) -> bool:
+        return int(topic_id) >= MIN_USABLE_FORUM_TOPIC_ID
+
+    def _drop_invalid_topic_mapping(self, entry: TopicEntry) -> None:
+        if self._is_usable_telegram_topic_id(entry.topic_id):
+            return
+        removed = self.store.remove_topic(entry.topic_id)
+        if removed:
+            logger.warning(
+                "Removed invalid Telegram topic mapping: topic_id=%s transport=%s messenger_id=%s",
+                removed.topic_id,
+                removed.transport,
+                removed.messenger_id,
+            )
+
     async def _get_or_create_topic(self, message: IncomingMessengerMessage) -> TopicEntry:
         existing = self.store.get_topic_by_messenger(message.transport, message.messenger_id)
+        if existing:
+            if not self._is_usable_telegram_topic_id(existing.topic_id):
+                self._drop_invalid_topic_mapping(existing)
+                existing = None
         if existing:
             logger.debug(
                 "Topic mapping found: topic_id=%s transport=%s messenger_id=%s thread_id=%s chat_jid=%s name=%s",
@@ -375,6 +399,10 @@ class MessengerTelegramBridge:
         lock = self._topic_locks.setdefault(key, asyncio.Lock())
         async with lock:
             existing = self.store.get_topic_by_messenger(message.transport, message.messenger_id)
+            if existing:
+                if not self._is_usable_telegram_topic_id(existing.topic_id):
+                    self._drop_invalid_topic_mapping(existing)
+                    existing = None
             if existing:
                 logger.debug(
                     "Topic mapping found after lock: topic_id=%s transport=%s messenger_id=%s",
@@ -627,13 +655,14 @@ class MessengerTelegramBridge:
             )
             return topic.message_thread_id
         except TelegramError as exc:
-            logger.warning("Could not create Telegram forum topic, using General topic: %s", exc)
-            await self._notify_general(
-                "Could not create Telegram topic. Using General topic instead. "
-                "Run /checktopics to verify the group is a forum supergroup and the bot has Manage Topics permission. "
-                f"Telegram error: {exc}"
+            logger.warning("Could not create Telegram forum topic: %s", exc)
+            await self._notify_general_once(
+                "create_forum_topic_failed",
+                "Could not create Telegram forum topic. "
+                "Run /checktopics — the group must be a forum supergroup and the bot needs Manage Topics. "
+                f"Telegram error: {exc}",
             )
-            return 1
+            raise
 
     async def _send_topic_intro(self, entry: TopicEntry, message: IncomingMessengerMessage) -> None:
         assert self.bot is not None
@@ -807,7 +836,7 @@ class MessengerTelegramBridge:
         use_topic: bool = True,
     ) -> dict[str, object]:
         kwargs: dict[str, object] = {"chat_id": self.config.telegram_group_id}
-        if use_topic:
+        if use_topic and self._is_usable_telegram_topic_id(entry.topic_id):
             kwargs["message_thread_id"] = entry.topic_id
         if reply_to_tg_message_id:
             kwargs["reply_parameters"] = ReplyParameters(
@@ -919,9 +948,10 @@ class MessengerTelegramBridge:
                 entry.transport,
                 entry.messenger_id,
             )
-            await self._notify_general(
-                f"Telegram topic {entry.topic_id} for {entry.name} no longer exists. "
-                "Creating a fresh topic and retrying."
+            await self._notify_general_once(
+                f"stale_topic:{message.transport}:{message.messenger_id}",
+                f"Telegram topic {entry.topic_id} for {entry.name} is invalid or missing. "
+                "Creating a fresh topic and retrying.",
             )
 
         fresh_entry = await self._get_or_create_topic(message)
@@ -931,9 +961,10 @@ class MessengerTelegramBridge:
             if not self._is_topic_missing_error(exc):
                 raise
 
-            await self._notify_general(
-                "Telegram still rejected the new topic with 'message thread not found'. "
-                "Sending this Messenger message to the group without a topic. Run /checktopics to verify forum permissions."
+            await self._notify_general_once(
+                f"stale_topic_retry:{message.transport}:{message.messenger_id}",
+                "Telegram still rejected the forum topic. "
+                "Sending this Messenger message to the group without a topic. Run /checktopics to verify forum permissions.",
             )
             return await self._send_inbound_to_telegram(
                 fresh_entry,
@@ -957,7 +988,7 @@ class MessengerTelegramBridge:
             "parse_mode": ParseMode.HTML,
             "disable_web_page_preview": True,
         }
-        if use_topic:
+        if use_topic and self._is_usable_telegram_topic_id(entry.topic_id):
             kwargs["message_thread_id"] = entry.topic_id
         if reply_to_tg_message_id:
             kwargs["reply_parameters"] = ReplyParameters(
@@ -985,9 +1016,10 @@ class MessengerTelegramBridge:
                 entry.transport,
                 entry.messenger_id,
             )
-            await self._notify_general(
-                f"Telegram topic {entry.topic_id} for {entry.name} no longer exists. "
-                "Creating a fresh topic and retrying."
+            await self._notify_general_once(
+                f"stale_topic:{activity.transport}:{activity.messenger_id}",
+                f"Telegram topic {entry.topic_id} for {entry.name} is invalid or missing. "
+                "Creating a fresh topic and retrying.",
             )
 
         fresh_entry = await self._get_or_create_topic(self._activity_topic_message(activity))
@@ -997,9 +1029,10 @@ class MessengerTelegramBridge:
             if not self._is_topic_missing_error(exc):
                 raise
 
-            await self._notify_general(
-                "Telegram still rejected the new topic with 'message thread not found'. "
-                "Sending this Messenger activity to the group without a topic. Run /checktopics to verify forum permissions."
+            await self._notify_general_once(
+                f"stale_topic_retry:{activity.transport}:{activity.messenger_id}",
+                "Telegram still rejected the forum topic. "
+                "Sending this Messenger activity to the group without a topic. Run /checktopics to verify forum permissions.",
             )
             return await self._send_activity_to_telegram(
                 fresh_entry,
@@ -1406,6 +1439,23 @@ class MessengerTelegramBridge:
             or "topic_closed" in text
             or "topic closed" in text
         )
+
+    def _should_send_general_notify(self, key: str, window_ms: int = GENERAL_NOTIFY_DEDUPE_MS) -> bool:
+        now = int(time.time() * 1000)
+        last = self._general_notify_dedupe.get(key, 0)
+        if now - last < window_ms:
+            return False
+        self._general_notify_dedupe[key] = now
+        for old_key, seen_at in list(self._general_notify_dedupe.items()):
+            if now - seen_at > window_ms * 10:
+                self._general_notify_dedupe.pop(old_key, None)
+        return True
+
+    async def _notify_general_once(self, key: str, text: str) -> None:
+        if not self._should_send_general_notify(key):
+            logger.debug("Skipped duplicate Telegram general notify: key=%s", key)
+            return
+        await self._notify_general(text)
 
     async def _notify_general(self, text: str) -> None:
         if self.bot is None:

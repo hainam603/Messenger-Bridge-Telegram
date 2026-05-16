@@ -4,4 +4,6 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
-facebook-cookie.txt
+.ipa_extract/
+*.ipa
+cookie.txt

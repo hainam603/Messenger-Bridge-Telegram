@@ -115,9 +115,32 @@ python -m pip install --upgrade "git+https://github.com/MinhHuyDev/fbchat-v2.git
 
 Trong `.env`:
 
-```env
-FBCHAT_V2_USE_PACKAGE=1
-```
+| Biến | Bắt buộc | Mô tả |
+|---|---:|---|
+| `LOG_LEVEL` | Không | Mức log in ra terminal. Dùng `DEBUG` để hiện chi tiết nhất, `INFO` để gọn hơn. Mặc định `DEBUG`. |
+| `TG_TOKEN` | Có | Token bot Telegram lấy từ BotFather. |
+| `TG_GROUP_ID` | Có | ID Telegram supergroup, thường có dạng `-100...`. |
+| `FACEBOOK_COOKIE` | Có* | Cookie Facebook của tài khoản Messenger. |
+| `FACEBOOK_COOKIE_FILE` | Có* | Đường dẫn file chứa cookie, dùng thay cho `FACEBOOK_COOKIE`. |
+| `DATA_DIR` | Không | Thư mục lưu `bridge-store.json`, mặc định là `./data`. |
+| `FBCHAT_V2_USE_PACKAGE` | Không | Dùng package `fbchat-v2` đã cài từ PyPI/GitHub thay vì auto-detect folder local. Mặc định `0`. |
+| `FBCHAT_V2_USE_PYPI` | Không | Đồng nghĩa với `FBCHAT_V2_USE_PACKAGE`; giữ để tương thích. Mặc định `0`. |
+| `FBCHAT_V2_SRC_PATH` | Không | Đường dẫn tới thư mục `fbchat-v2/src` khi muốn dùng source local/đã patch. Project có auto-detect một số vị trí local nếu `FBCHAT_V2_USE_PACKAGE=0`. |
+| `FBCHAT_E2EE_BIN` | Không | Đường dẫn tới binary `fbchat-bridge-e2ee`. |
+| `FBCHAT_ENABLE_E2EE` | Không | Bật/tắt E2EE listener, mặc định `1`. |
+| `FBCHAT_E2EE_MEMORY_ONLY` | Không | Lưu key E2EE trong RAM, mặc định `1`. |
+| `FBCHAT_E2EE_DEVICE_PATH` | Không | File persist device/key E2EE khi không dùng memory-only. |
+| `FBCHAT_E2EE_LOG_LEVEL` | Không | Log level của bridge E2EE, mặc định `none`. |
+| `FBCHAT_E2EE_SEND_TIMEOUT` | Không | Timeout cho send E2EE RPC, mặc định `180` giây. |
+| `IGNORE_SELF_MESSAGES` | Không | Bỏ qua tin do chính tài khoản Facebook gửi, mặc định `0`. |
+| `MESSAGE_CACHE_LIMIT` | Không | Số mapping message giữ lại để reply/activity, mặc định `3000`. |
+| `TG_CONNECT_TIMEOUT` | Không | Timeout kết nối Telegram Bot API, mặc định `15`. |
+| `TG_READ_TIMEOUT` | Không | Timeout đọc response Telegram Bot API, mặc định `45`. |
+| `TG_WRITE_TIMEOUT` | Không | Timeout gửi request Telegram Bot API, mặc định `45`. |
+| `TG_POOL_TIMEOUT` | Không | Timeout chờ connection pool Telegram, mặc định `30`. |
+| `FORWARD_MESSENGER_REACTIONS` | Không | Forward reaction Messenger thành activity trong Telegram. Mặc định `1`; reaction giống hệt nhau sẽ được dedupe để tránh spam. |
+| `FORWARD_TYPING_ACTIVITY` | Không | Forward typing indicator sang Telegram. Mặc định `0` để tránh spam. |
+| `FORWARD_READ_RECEIPTS` | Không | Forward read receipt sang Telegram. Mặc định `0` để tránh spam. |
 
 Kiểm tra version/package:
 
