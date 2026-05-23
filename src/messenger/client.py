@@ -17,6 +17,9 @@ from models import IncomingMessengerMessage, QuoteData, TopicEntry
 MessengerEventCallback = Callable[[dict], None]
 logger = logging.getLogger(__name__)
 
+THREAD_INFO_DOC_ID = "2147762685294928"
+INBOX_THREADS_DOC_ID = "3336396659757871"
+
 
 class MessengerClient:
     def __init__(self, config: AppConfig) -> None:
@@ -30,6 +33,7 @@ class MessengerClient:
         self._event_callback: Optional[MessengerEventCallback] = None
         self._user_name_cache: dict[str, str] = {}
         self._thread_name_cache: dict[str, str] = {}
+        self._alias_name_cache: dict[str, str] = {}
 
     @property
     def last_error(self) -> Optional[BaseException]:
@@ -190,10 +194,233 @@ class MessengerClient:
                 "idUser": profile.get("id"),
                 "nameUser": profile.get("name"),
                 "firstName": profile.get("firstName"),
+                "nickname": profile.get("nickname"),
+                "secondaryName": profile.get("secondaryName") or profile.get("secondary_name"),
+                "profileNickname": profile.get("profileNickname") or profile.get("profile_nickname"),
+                "aliasName": profile.get("aliasName") or profile.get("alias_name"),
             }
         except Exception as exc:  # noqa: BLE001
             logger.debug("Could not resolve Messenger user name for %s: %s", user_id, exc)
             return None
+
+    @staticmethod
+    def _pick_alias_from_profile(profile: Optional[dict]) -> Optional[str]:
+        if not isinstance(profile, dict):
+            return None
+        for key in (
+            "nickname",
+            "secondaryName",
+            "profileNickname",
+            "aliasName",
+            "alias_name",
+            "profile_nickname",
+            "secondary_name",
+        ):
+            value = str(profile.get(key) or "").strip()
+            if value:
+                return value
+        return None
+
+    def _alias_from_user_info(self, user_id: str) -> Optional[str]:
+        info = self._request_user_info(user_id)
+        return self._pick_alias_from_profile(info)
+
+    def resolve_contact_alias_name(self, user_id: str, thread_lookup_id: Optional[str] = None) -> Optional[str]:
+        """Nickname/alias the viewer set for a contact (Messenger participant nickname)."""
+        clean_user_id = str(user_id or "").strip()
+        if not clean_user_id or clean_user_id == self.self_id or self.data_fb is None:
+            return None
+
+        cache_key = f"{clean_user_id}:{thread_lookup_id or ''}"
+        if cache_key in self._alias_name_cache:
+            return self._alias_name_cache[cache_key]
+        alias_source = ""
+        alias = self._request_thread_nickname_graphql(clean_user_id, thread_lookup_id)
+        if alias:
+            alias_source = "graphql_thread_info"
+        if not alias:
+            alias = self._alias_from_user_info(clean_user_id)
+            if alias:
+                alias_source = "chat_user_info"
+        if not alias:
+            alias = self._alias_from_thread_snapshot(clean_user_id, thread_lookup_id)
+            if alias:
+                alias_source = "listener_snapshot"
+
+        if alias:
+            self._alias_name_cache[cache_key] = alias
+            logger.debug(
+                "Resolved Messenger alias for user_id=%s thread=%s source=%s: %s",
+                clean_user_id,
+                thread_lookup_id or "-",
+                alias_source or "-",
+                alias,
+            )
+        return alias
+
+    def _alias_from_thread_snapshot(
+        self,
+        user_id: str,
+        thread_lookup_id: Optional[str],
+    ) -> Optional[str]:
+        try:
+            fbt = getattr(self.listener, "fbt", None)
+            if not isinstance(fbt, dict):
+                return None
+            data_get = fbt.get("dataGet")
+            if not data_get:
+                return None
+            nodes = json.loads(data_get)["o0"]["data"]["viewer"]["message_threads"]["nodes"]
+        except (KeyError, TypeError, json.JSONDecodeError):
+            return None
+
+        lookup_ids = {user_id}
+        clean_thread = str(thread_lookup_id or "").strip()
+        if clean_thread:
+            lookup_ids.add(clean_thread)
+
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            thread_key = node.get("thread_key") or {}
+            key_values = {
+                str(thread_key.get("thread_fbid") or ""),
+                str(thread_key.get("other_user_id") or ""),
+                str(thread_key.get("other_user_fbid") or ""),
+                str(node.get("id") or ""),
+            }
+            if not lookup_ids.intersection(key_values):
+                continue
+            other_user_id = str(thread_key.get("other_user_id") or user_id).strip() or user_id
+            alias = self._nickname_from_customization_info(node, other_user_id)
+            if alias:
+                return alias
+        return None
+
+    def _request_thread_nickname_graphql(
+        self,
+        user_id: str,
+        thread_lookup_id: Optional[str],
+    ) -> Optional[str]:
+        lookup_ids: list[str] = []
+        for candidate in (thread_lookup_id, user_id):
+            clean = str(candidate or "").strip()
+            if clean and clean.isdigit() and clean not in lookup_ids:
+                lookup_ids.append(clean)
+        if not lookup_ids:
+            return None
+
+        for lookup_id in lookup_ids:
+            node = self._fetch_thread_info_node(lookup_id)
+            if not isinstance(node, dict):
+                continue
+            thread_key = node.get("thread_key") or {}
+            other_user_id = str(thread_key.get("other_user_id") or user_id).strip() or user_id
+            alias = self._nickname_from_customization_info(node, other_user_id)
+            if alias:
+                return alias
+        return None
+
+    def _fetch_thread_info_node(self, thread_lookup_id: str) -> Optional[dict]:
+        if self.data_fb is None:
+            return None
+
+        params = {
+            "id": str(thread_lookup_id),
+            "message_limit": 0,
+            "load_messages": False,
+            "load_read_receipts": False,
+            "before": None,
+        }
+        payload = self._graphql_request(
+            THREAD_INFO_DOC_ID,
+            params,
+            friendly_name="MessengerThreadInfoQuery",
+        )
+        if not isinstance(payload, dict):
+            return None
+
+        message_thread = payload.get("message_thread")
+        if isinstance(message_thread, dict):
+            return message_thread
+        return None
+
+    def _graphql_request(self, doc_id: str, params: dict, *, friendly_name: str) -> Optional[dict]:
+        if self.data_fb is None:
+            return None
+
+        try:
+            requests_mod = import_module("requests")
+            utils = self._import_fbchat_module("_core._utils")
+            data_form = utils.formAll(
+                self.data_fb,
+                FBApiReqFriendlyName=friendly_name,
+                docID=doc_id,
+            )
+            data_form["variables"] = json.dumps(params, separators=(",", ":"))
+
+            response = requests_mod.post(
+                "https://www.facebook.com/api/graphql/",
+                headers=utils.Headers(data_form),
+                timeout=10,
+                data=data_form,
+                cookies=utils.parse_cookie_string(self.data_fb["cookieFacebook"]),
+                verify=True,
+            )
+            text = response.text.strip()
+            if text.startswith("for (;;);"):
+                text = text.split("for (;;);", 1)[1].lstrip()
+
+            decoder = json.JSONDecoder()
+            idx = 0
+            while idx < len(text):
+                while idx < len(text) and text[idx].isspace():
+                    idx += 1
+                if idx >= len(text):
+                    break
+                obj, end = decoder.raw_decode(text, idx)
+                idx = end
+                if isinstance(obj, dict):
+                    if "data" in obj:
+                        return obj["data"]
+                    if "o0" in obj and isinstance(obj["o0"], dict):
+                        data = obj["o0"].get("data")
+                        if isinstance(data, dict):
+                            return data
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "GraphQL request failed: doc_id=%s params=%s error=%s",
+                doc_id,
+                params,
+                exc,
+            )
+        return None
+
+    @staticmethod
+    def _nickname_from_customization_info(data: dict, other_user_id: str) -> Optional[str]:
+        info = data.get("customization_info")
+        if not isinstance(info, dict):
+            return None
+
+        customizations = info.get("participant_customizations") or []
+        if not isinstance(customizations, list):
+            return None
+
+        clean_other = str(other_user_id or "").strip()
+        nicknames: dict[str, str] = {}
+        for item in customizations:
+            if not isinstance(item, dict):
+                continue
+            participant_id = str(item.get("participant_id") or "").strip()
+            nickname = str(item.get("nickname") or "").strip()
+            if participant_id and nickname:
+                nicknames[participant_id] = nickname
+
+        if clean_other and clean_other in nicknames:
+            return nicknames[clean_other]
+        if len(nicknames) == 1:
+            return next(iter(nicknames.values()))
+        return None
 
     def resolve_thread_name(self, thread_id: str) -> Optional[str]:
         clean_id = str(thread_id or "").strip()
@@ -243,6 +470,12 @@ class MessengerClient:
             if lookup_id not in key_values:
                 continue
 
+            thread_key = node.get("thread_key") or {}
+            other_user_id = str(thread_key.get("other_user_id") or lookup_id).strip() or lookup_id
+            alias = self._nickname_from_customization_info(node, other_user_id)
+            if alias:
+                return alias
+
             thread_name = str(node.get("name") or "").strip()
             if thread_name:
                 return thread_name
@@ -268,6 +501,13 @@ class MessengerClient:
         return fallback_name
 
     def resolve_topic_display_name(self, message: IncomingMessengerMessage) -> Optional[str]:
+        if self._is_one_to_one_message(message):
+            thread_lookup = message.thread_id or self._jid_user(message.messenger_id)
+            for candidate_id in self._candidate_profile_ids(message):
+                alias = self.resolve_contact_alias_name(candidate_id, thread_lookup)
+                if alias:
+                    return alias
+
         event_thread_name = str(message.thread_name or "").strip()
         if event_thread_name:
             self._thread_name_cache[message.thread_id] = event_thread_name
@@ -285,6 +525,19 @@ class MessengerClient:
             if user_name:
                 return user_name
         return None
+
+    @staticmethod
+    def _is_one_to_one_message(message: IncomingMessengerMessage) -> bool:
+        if MessengerClient._is_regular_group_message(message):
+            return False
+        if message.thread_type not in {0, 1}:
+            return False
+
+        thread_id = str(message.thread_id or message.messenger_id or "").strip()
+        sender_id = str(message.sender_id or "").strip()
+        if message.transport == "e2ee" and message.thread_name and thread_id and sender_id and thread_id != sender_id:
+            return False
+        return True
 
     @staticmethod
     def _is_regular_group_message(message: IncomingMessengerMessage) -> bool:
