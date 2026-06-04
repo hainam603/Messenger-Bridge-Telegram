@@ -129,6 +129,7 @@ class AppConfig:
     forward_messenger_reactions: bool
     forward_typing_activity: bool
     forward_read_receipts: bool
+    kv_store_url: Optional[str]
 
 
 def load_config() -> AppConfig:
@@ -166,4 +167,5 @@ def load_config() -> AppConfig:
         forward_messenger_reactions=_env_bool("FORWARD_MESSENGER_REACTIONS", True),
         forward_typing_activity=_env_bool("FORWARD_TYPING_ACTIVITY", False),
         forward_read_receipts=_env_bool("FORWARD_READ_RECEIPTS", False),
+        kv_store_url=os.environ.get("KV_STORE_URL") or None,
     )

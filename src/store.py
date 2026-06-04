@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import time
+import logging
+import threading
+import requests
 from dataclasses import asdict
 from pathlib import Path
 from threading import RLock
@@ -11,10 +14,12 @@ from models import QuoteData, TopicEntry, Transport
 
 
 class BridgeStore:
-    def __init__(self, path: Path, *, message_cache_limit: int = 3000) -> None:
+    def __init__(self, path: Path, *, message_cache_limit: int = 3000, kv_store_url: Optional[str] = None) -> None:
         self.path = path
         self.message_cache_limit = message_cache_limit
+        self.kv_store_url = kv_store_url
         self._lock = RLock()
+        self._dirty = False
         self._data: dict[str, Any] = {
             "version": 1,
             "topics": {},
@@ -23,7 +28,10 @@ class BridgeStore:
             "message_order": [],
             "tg_quotes": {},
         }
+        self._download_from_kv()
         self._load()
+        if self.kv_store_url:
+            self._start_sync_thread()
 
     @staticmethod
     def _messenger_key(transport: Transport, messenger_id: str) -> str:
@@ -54,6 +62,58 @@ class BridgeStore:
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
         tmp.write_text(json.dumps(self._data, indent=2, ensure_ascii=False), encoding="utf-8")
         tmp.replace(self.path)
+        self._dirty = True
+
+    def _download_from_kv(self) -> None:
+        if not self.kv_store_url:
+            return
+        logger = logging.getLogger(__name__)
+        logger.info("Downloading store from KV Store: %s", self.kv_store_url)
+        try:
+            response = requests.get(self.kv_store_url, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if isinstance(data, dict) and "topics" in data:
+                    self.path.parent.mkdir(parents=True, exist_ok=True)
+                    self.path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+                    logger.info("Successfully restored store from KV Store")
+                else:
+                    logger.warning("Downloaded data from KV Store is invalid or empty")
+            elif response.status_code == 404:
+                logger.info("KV Store is empty (404), starting with fresh local store")
+            else:
+                logger.error("Failed to download from KV Store, HTTP status: %d", response.status_code)
+        except Exception as e:
+            logger.error("Error downloading from KV Store: %s", e)
+
+    def _start_sync_thread(self) -> None:
+        thread = threading.Thread(target=self._sync_loop, daemon=True, name="kv-store-sync")
+        thread.start()
+
+    def _sync_loop(self) -> None:
+        import time
+        logger = logging.getLogger(__name__)
+        while True:
+            time.sleep(30)
+            should_sync = False
+            data_to_send = None
+            with self._lock:
+                if self._dirty:
+                    should_sync = True
+                    data_to_send = json.dumps(self._data, ensure_ascii=False)
+            if should_sync and data_to_send:
+                logger.debug("Syncing store to KV Store...")
+                try:
+                    headers = {"Content-Type": "application/json"}
+                    response = requests.put(self.kv_store_url, data=data_to_send.encode("utf-8"), headers=headers, timeout=15)
+                    if response.status_code in (200, 201):
+                        logger.info("Successfully synced store to KV Store")
+                        with self._lock:
+                            self._dirty = False
+                    else:
+                        logger.error("Failed to sync to KV Store, HTTP status: %d, response: %s", response.status_code, response.text)
+                except Exception as e:
+                    logger.error("Error syncing to KV Store: %s", e)
 
     def all_topics(self) -> list[TopicEntry]:
         with self._lock:

@@ -58,6 +58,7 @@ def main() -> None:
 	store = BridgeStore(
 		config.store_path,
 		message_cache_limit=config.message_cache_limit,
+		kv_store_url=config.kv_store_url,
 	)
 	messenger = MessengerClient(config)
 	bridge = MessengerTelegramBridge(config, store, messenger)
