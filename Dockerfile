@@ -3,11 +3,10 @@ FROM golang:1.24-alpine AS go-builder
 
 RUN apk add --no-cache git
 
-WORKDIR /app
-# Clone the fbchat-v2 repository to compile the E2EE bridge binary
-RUN git clone https://github.com/MinhHuyDev/fbchat-v2.git
+WORKDIR /app/bridge-e2ee
+# Copy the local bridge-e2ee folder which contains our patch
+COPY bridge-e2ee/ .
 
-WORKDIR /app/fbchat-v2/bridge-e2ee
 # Clone the mautrix-meta repository dependency
 RUN git clone https://github.com/mautrix/meta.git ./meta
 # Tidy Go modules and compile
