@@ -1,5 +1,5 @@
 # --- Stage 1: Build the Go E2EE binary ---
-FROM golang:1.24-alpine AS go-builder
+FROM golang:alpine AS go-builder
 
 RUN apk add --no-cache git
 
