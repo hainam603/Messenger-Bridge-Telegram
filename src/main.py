@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import sys
+import os
+import threading
 import logging
 from pathlib import Path
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 
 HERE = Path(__file__).resolve().parent
@@ -14,6 +17,26 @@ from config import load_config
 from messenger.client import MessengerClient
 from store import BridgeStore
 from tg.bot import build_application
+
+
+class HealthHandler(BaseHTTPRequestHandler):
+	def do_GET(self) -> None:
+		self.send_response(200)
+		self.send_header("Content-type", "text/plain; charset=utf-8")
+		self.end_headers()
+		self.wfile.write(b"OK")
+
+	def log_message(self, format: str, *args: any) -> None:
+		# Keep console logging quiet for requests
+		pass
+
+
+def start_health_server() -> None:
+	port = int(os.environ.get("PORT", "8080"))
+	server = HTTPServer(("0.0.0.0", port), HealthHandler)
+	thread = threading.Thread(target=server.serve_forever, daemon=True)
+	thread.start()
+	logging.getLogger(__name__).info("Health check server listening on port %d", port)
 
 
 def setup_logging(level_name: str) -> None:
@@ -39,6 +62,9 @@ def main() -> None:
 	messenger = MessengerClient(config)
 	bridge = MessengerTelegramBridge(config, store, messenger)
 	application = build_application(config, bridge, store)
+
+	# Start background health server for Render/Koyeb
+	start_health_server()
 
 	print("+----------------------------------------+")
 	print("| Messenger <-> Telegram Bridge          |")
